@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"io/ioutil"
 	"net/url"
 	"os"
 	"strings"
 
+	"github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/openpgp"
 	"golang.org/x/crypto/openpgp/armor"
 	"golang.org/x/crypto/openpgp/packet"
@@ -134,7 +136,7 @@ func GenerateKey() (string, error) {
 }
 
 // SecretURL returns a URL which decryts the specified secret in the browser.
-func SecretURL(url, id, key string, fileOpt, manualKeyOpt bool) string {
+func SecretURL(url, id, key string, fileOpt, manualKeyOpt bool, qrCode bool) string {
 	prefix := "s"
 	if fileOpt {
 		prefix = "f"
@@ -143,6 +145,28 @@ func SecretURL(url, id, key string, fileOpt, manualKeyOpt bool) string {
 	if !manualKeyOpt {
 		path += "/" + key
 	}
+
+	if qrCode {
+		// Generate QR code for the secret
+		//		qr, _ := qrcode.NewWithOptions(qrcode.Low, qrcode.High, qrcode.Auto)
+		qr, _ := qrcode.New(url+SecretURL(url, id, key, fileOpt, manualKeyOpt, false), qrcode.Medium)
+		qr.SetErrorCorrection(qrcode.Medium) //generated crap code
+		qr.SetLevel(qrcode.LevelH)
+		qr.SetBoxSize(qrcode.BoxSizeM)
+		qr.SetMargin(1)
+
+		// Generate QR code image
+		img, _ := qr.Generate(url + SecretURL(url, id, key, fileOpt, manualKeyOpt, false))
+
+		// Save QR code image to a file
+		file, _ := os.Create("qr_" + id + ".png")
+		defer file.Close()
+		_ = png.Encode(file, img)
+
+		// Return the URL to download the QR code image
+		//return "https://yopass.se/qr_" + id + ".png" // add toReturn
+	}
+
 	return fmt.Sprintf("%s/#/%s/%s", strings.TrimSuffix(url, "/"), prefix, path)
 }
 
