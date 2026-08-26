@@ -41,7 +41,11 @@
     "subtitleChannel": "The cautious should send the decryption key in a separate communication channel.",
     "rowLabelOneClick": "One-click link",
     "rowLabelShortLink": "Short link",
-    "rowLabelDecryptionKey": "Decryption key"
+    "rowLabelDecryptionKey": "Decryption key",
+    "buttonShowQr": "Show QR code",
+    "buttonHideQr": "Hide QR code",
+    "qrCodeTitle": "QR Code",
+    "qrSubtitle": "Scan with your mobile camera to open and decrypt this secret"
   },
   "secret": {
     "titleFile": "File downloaded",

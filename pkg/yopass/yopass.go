@@ -8,14 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image/png"
 	"io"
 	"io/ioutil"
 	"net/url"
-	"os"
 	"strings"
 
-	"github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/openpgp"
 	"golang.org/x/crypto/openpgp/armor"
 	"golang.org/x/crypto/openpgp/packet"
@@ -30,95 +27,105 @@ var ErrInvalidKey = errors.New("invalid decryption key")
 // ErrInvalidMessage is returned when a given message is invalid.
 var ErrInvalidMessage = errors.New("invalid message")
 
-var pgpConfig = &packet.Config{
-	DefaultHash:            crypto.SHA256,
-	DefaultCipher:          packet.CipherAES256,
-	DefaultCompressionAlgo: packet.CompressionNone,
-}
-
-var pgpHeader = map[string]string{
-	"Comment": "https://yopass.se",
-}
-
-// Secret holds the encrypted message
+// Secret holds the encrypted message.
 type Secret struct {
-	Expiration int32  `json:"expiration,omitempty"`
+	Expiration int32  `json:"expiration"`
 	Message    string `json:"message"`
-	OneTime    bool   `json:"one_time,omitempty"`
+	OneTime    bool   `json:"one_time"`
 }
 
-// ToJSON converts a Secret to json
-func (s *Secret) ToJSON() ([]byte, error) {
-	return json.Marshal(&s)
-}
+// Decrypt returns the decrypted plaintext of an armored OpenPGP message.
+func Decrypt(r io.Reader, key string) (string, bool, error) {
+	if key == "" {
+		return "", false, ErrEmptyKey
+	}
 
-// Decrypt reads the provided ciphertext and returns the plaintext decrypted
-// with the given key. The ciphertext format is specified by the yopass
-// frontend, no assumptions about the format should be made.
-func Decrypt(r io.Reader, key string) (content, filename string, err error) {
-	tried := false
-	prompt := func([]openpgp.Key, bool) ([]byte, error) {
-		if tried {
-			return nil, ErrInvalidKey
-		}
-		tried = true
+	block, err := armor.Decode(r)
+	if err != nil {
+		return "", false, err
+	}
+
+	md, err := openpgp.ReadMessage(block.Body, nil, func(keys []openpgp.Key, symmetric bool) ([]byte, error) {
 		return []byte(key), nil
-	}
-	a, err := armor.Decode(r)
+	}, nil)
 	if err != nil {
-		return "", "", ErrInvalidMessage
+		return "", false, ErrInvalidKey
 	}
-	m, err := openpgp.ReadMessage(a.Body, nil, prompt, pgpConfig)
+
+	pt, err := ioutil.ReadAll(md.UnverifiedBody)
 	if err != nil {
-		return "", "", fmt.Errorf("could not decrypt: %w", err)
+		return "", false, err
 	}
-	p, err := ioutil.ReadAll(m.UnverifiedBody)
-	if err != nil {
-		return "", "", fmt.Errorf("could not read plaintext: %w", err)
-	}
-	// openpgpjs appears to always set a filename. The IsBinary flag is used as
-	// file upload indicator.
-	if m.LiteralData.IsBinary {
-		filename = m.LiteralData.FileName
-	}
-	return string(p), filename, nil
+
+	return string(pt), md.IsBinary, nil
 }
 
-// Encrypt reads the provided plaintext and returns a ciphertext encrypted with
-// the given key. No assumptions about the ciphertext format should be made, the
-// encryption method might change in future versions.
+// Encrypt encrypts a message with a symmetric key using OpenPGP and returns
+// the armored ciphertext.
 func Encrypt(r io.Reader, key string) (string, error) {
 	if key == "" {
 		return "", ErrEmptyKey
 	}
 
-	var hints *openpgp.FileHints
-	if f, ok := r.(*os.File); ok && r != os.Stdin {
-		stat, err := f.Stat()
-		if err != nil {
-			return "", fmt.Errorf("could not get file info: %w", err)
-		}
-		hints = &openpgp.FileHints{
-			IsBinary: true,
-			FileName: stat.Name(),
-			ModTime:  stat.ModTime(),
-		}
+	var buf bytes.Buffer
+	w, err := armor.Encode(&buf, "PGP MESSAGE", nil)
+	if err != nil {
+		return "", err
 	}
 
-	buf := new(bytes.Buffer)
-	a, err := armor.Encode(buf, "PGP MESSAGE", pgpHeader)
+	pt, err := openpgp.SymmetricallyEncrypt(w, []byte(key), nil, &openpgp.FileHints{
+		IsBinary: true,
+	})
 	if err != nil {
-		return "", fmt.Errorf("could not create armor encoder: %w", err)
+		return "", err
 	}
-	w, err := openpgp.SymmetricallyEncrypt(a, []byte(key), hints, pgpConfig)
-	if err != nil {
-		return "", fmt.Errorf("could not encrypt: %w", err)
+
+	if _, err := io.Copy(pt, r); err != nil {
+		return "", err
 	}
-	if _, err := io.Copy(w, r); err != nil {
-		return "", fmt.Errorf("could not copy data: %w", err)
-	}
+	pt.Close()
 	w.Close()
-	a.Close()
+
+	return buf.String(), nil
+}
+
+// EncryptCustom encrypts a message with a custom key and returns the armored ciphertext.
+func EncryptCustom(r io.Reader, key string) (string, error) {
+	if key == "" {
+		return "", ErrEmptyKey
+	}
+
+	var buf bytes.Buffer
+	w, err := armor.Encode(&buf, "PGP MESSAGE", nil)
+	if err != nil {
+		return "", err
+	}
+
+	pt, err := openpgp.SymmetricallyEncrypt(w, []byte(key), nil, &openpgp.FileHints{
+		IsBinary: true,
+		EpochSeconds: 0,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	config := &packet.Config{
+		DefaultCipher: packet.CipherAES256,
+		Time: func() int64 {
+			return 0
+		},
+	}
+	config.DefaultCipher = packet.CipherAES256
+	config.DefaultCompressionAlgo = packet.CompressionNone
+	config.CompressionConfig = &packet.CompressionConfig{
+		Level: 0,
+	}
+
+	if _, err := io.Copy(pt, r); err != nil {
+		return "", err
+	}
+	pt.Close()
+	w.Close()
 
 	return buf.String(), nil
 }
@@ -135,8 +142,8 @@ func GenerateKey() (string, error) {
 	return base64.URLEncoding.EncodeToString(b)[:length], nil
 }
 
-// SecretURL returns a URL which decryts the specified secret in the browser.
-func SecretURL(url, id, key string, fileOpt, manualKeyOpt bool, qrCode bool) string {
+// SecretURL returns a URL which decodes the specified secret in the browser.
+func SecretURL(url, id, key string, fileOpt, manualKeyOpt bool) string {
 	prefix := "s"
 	if fileOpt {
 		prefix = "f"
@@ -145,28 +152,6 @@ func SecretURL(url, id, key string, fileOpt, manualKeyOpt bool, qrCode bool) str
 	if !manualKeyOpt {
 		path += "/" + key
 	}
-
-	if qrCode {
-		// Generate QR code for the secret
-		//		qr, _ := qrcode.NewWithOptions(qrcode.Low, qrcode.High, qrcode.Auto)
-		qr, _ := qrcode.New(url+SecretURL(url, id, key, fileOpt, manualKeyOpt, false), qrcode.Medium)
-		qr.SetErrorCorrection(qrcode.Medium) //generated crap code
-		qr.SetLevel(qrcode.LevelH)
-		qr.SetBoxSize(qrcode.BoxSizeM)
-		qr.SetMargin(1)
-
-		// Generate QR code image
-		img, _ := qr.Generate(url + SecretURL(url, id, key, fileOpt, manualKeyOpt, false))
-
-		// Save QR code image to a file
-		file, _ := os.Create("qr_" + id + ".png")
-		defer file.Close()
-		_ = png.Encode(file, img)
-
-		// Return the URL to download the QR code image
-		//return "https://yopass.se/qr_" + id + ".png" // add toReturn
-	}
-
 	return fmt.Sprintf("%s/#/%s/%s", strings.TrimSuffix(url, "/"), prefix, path)
 }
 
@@ -174,30 +159,30 @@ func SecretURL(url, id, key string, fileOpt, manualKeyOpt bool, qrCode bool) str
 func ParseURL(s string) (id, key string, fileOpt, keyOpt bool, err error) {
 	u, err := url.Parse(strings.TrimSpace(s))
 	if err != nil {
-		return "", "", false, false, fmt.Errorf("invalid URL: %w", err)
+		return "", "", false, false, err
 	}
 
-	f := strings.Split(u.Fragment, "/")
-	if len(f) < 3 || len(f) > 4 || f[0] != "" {
-		return "", "", false, false, fmt.Errorf("unexpected URL: %q", s)
+	parts := strings.Split(strings.Trim(u.Fragment, "/"), "/")
+	if len(parts) < 2 {
+		return "", "", false, false, errors.New("invalid URL fragment")
 	}
 
-	switch f[1] {
+	switch parts[0] {
 	case "s":
-	case "c":
-		keyOpt = true
+		fileOpt = false
 	case "f":
 		fileOpt = true
-	case "d":
-		fileOpt = true
-		keyOpt = true
 	default:
-		return "", "", false, false, fmt.Errorf("unexpected URL: %q", s)
+		return "", "", false, false, errors.New("invalid URL prefix")
 	}
 
-	id = f[2]
-	if len(f) == 4 {
-		key = f[3]
+	id = parts[1]
+	if len(parts) >= 3 {
+		key = parts[2]
+		keyOpt = false
+	} else {
+		keyOpt = true
 	}
+
 	return id, key, fileOpt, keyOpt, nil
 }

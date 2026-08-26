@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jhaals/yopass/pkg/yopass"
+	"github.com/skip2/go-qrcode"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
@@ -27,6 +28,9 @@ Examples:
 
       # Encrypt and share secret file
       yopass --file /path/to/secret.conf
+
+      # Share secret with terminal QR code
+      printf 'secret message' | yopass --qr
 
       # Share secret multiple time a whole day
       cat secret-notes.md | yopass --expiration=1d --one-time=false
@@ -73,6 +77,7 @@ func init() {
 	pflag.String("file", viper.GetString("file"), "Read secret from file instead of stdin")
 	pflag.String("key", viper.GetString("key"), "Manual encryption/decryption key")
 	pflag.Bool("one-time", viper.GetBool("one-time"), "One-time download")
+	pflag.Bool("qr", false, "Print QR code to terminal")
 	pflag.String("url", viper.GetString("url"), "Yopass public URL")
 	viper.BindPFlags(pflag.CommandLine)
 }
@@ -122,9 +127,6 @@ func decrypt(out io.Writer) error {
 		return fmt.Errorf("Failed to decrypt secret: %w", err)
 	}
 
-	// Note yopass decrypt currently always prints the content to stdout. This
-	// could be changed to create a file, but will need to handle the case that
-	// the file already exists.
 	_, err = fmt.Fprint(out, pt)
 	return err
 }
@@ -182,8 +184,20 @@ func encrypt(in io.ReadCloser, out io.Writer) error {
 	}
 
 	url := viper.GetString("url")
-	_, err = fmt.Fprintln(out, yopass.SecretURL(url, id, key, viper.IsSet("file"), viper.IsSet("key")))
-	return err
+	secretURL := yopass.SecretURL(url, id, key, viper.IsSet("file"), viper.IsSet("key"))
+	_, err = fmt.Fprintln(out, secretURL)
+	if err != nil {
+		return err
+	}
+
+	if viper.GetBool("qr") {
+		qr, qrErr := qrcode.New(secretURL, qrcode.Medium)
+		if qrErr == nil {
+			fmt.Fprintln(out, qr.ToSmallString(false))
+		}
+	}
+
+	return nil
 }
 
 func encryptionKey(key string) (string, error) {
